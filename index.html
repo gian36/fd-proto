@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<!--
+  FLIGHT DISPATCH — prototype instrument (studio project 005)
+  Governed by ../PROTOTYPE_BRIEF.md. One question:
+    "Does allocation against announced arrivals produce deliberation,
+     or does it collapse into tapping?"
+
+  This is an INSTRUMENT, not a product. It is allowed to be ugly, and it is
+  thrown away by design (§6). One self-contained file: no framework, no build
+  step, no package manager, no backend, no analytics, no accounts.
+
+  Rules implemented here are mirrored exactly by proto/verify_solvability.py,
+  which reads the timetables out of THIS file so that what is verified is what
+  ships. If a rule changes, change both. Derivation: proto/TIMETABLES.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Flight Dispatch — prototype</title>
+<style>
+  :root{
+    --bg:#11161c; --panel:#1a222b; --line:#2b3947; --ink:#e8eef4; --dim:#8ba0b3;
+    --fuel:#e0a341; --bags:#5aa9e6; --cater:#63c48a;
+    --warn:#e2574c; --ok:#63c48a; --stand:#243240;
+    --gut:10px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{
+    height:100%; overflow:hidden; background:var(--bg); color:var(--ink);
+    font:600 14px/1.25 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-user-select:none; user-select:none; overscroll-behavior:none;
+    touch-action:none;
+  }
+  /* The tray is the drag SOURCE: if it clips, nothing works (§6, spike §9).
+     inset:0 is NOT safe on a phone — mobile browsers size a fixed element to
+     the LARGE viewport, so the bottom sits under the address bar whenever the
+     bar is showing. dvh tracks the dynamic viewport instead; 100% is the
+     fallback for anything that does not know dvh. */
+  #app{
+    position:fixed; left:0; right:0; top:0;
+    height:100%; height:100dvh;
+    display:flex; flex-direction:column;
+    padding:calc(env(safe-area-inset-top,0px) + 6px) var(--gut)
+            calc(env(safe-area-inset-bottom,0px) + 6px);
+    gap:6px; touch-action:none;
+  }
+
+  /* ---- header: shift clock, level, delay meter (always visible, §2) ---- */
+  #hud{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  #clock{font-variant-numeric:tabular-nums;font-size:19px;letter-spacing:.5px}
+  #lvl{color:var(--dim);font-size:11px;letter-spacing:1.2px}
+  #cond{font-size:10px;letter-spacing:1px;color:var(--dim);opacity:.65}
+  #delaywrap{margin-left:auto;display:flex;align-items:center;gap:6px}
+  #delaybar{width:96px;height:12px;background:var(--stand);border:1px solid var(--line);
+            border-radius:2px;overflow:hidden}
+  #delayfill{height:100%;width:0;background:var(--warn);transition:width .12s linear}
+  #delaynum{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;min-width:30px}
+
+  .cap{font-size:10px;letter-spacing:1.6px;color:var(--dim);flex:0 0 auto}
+
+  /* ---- arrivals queue ---- */
+  #arrivals{flex:1 1 34%;min-height:0;display:flex;flex-direction:column;gap:4px}
+  #arrlist{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:5px;
+           overflow:hidden}
+  .arr{display:flex;align-items:center;gap:8px;background:var(--panel);
+       border:1px solid var(--line);border-left:3px solid var(--dim);
+       border-radius:3px;padding:7px 8px;flex:0 0 auto;touch-action:none}
+  .arr.grab{opacity:.35}
+  .arr .eta{font-variant-numeric:tabular-nums;font-size:15px;min-width:42px}
+  .arr .cs{font-size:10px;color:var(--dim);letter-spacing:.6px;min-width:52px}
+  .hull{height:12px;border-radius:2px;background:#48606f;flex:0 0 auto}
+  .hull.N{width:22px} .hull.W{width:36px}
+  .needs{display:flex;gap:5px;margin-left:auto}
+  #blindnote{flex:1 1 auto;display:flex;align-items:center;justify-content:center;
+             color:#3d4d5c;font-size:11px;letter-spacing:2px;border:1px dashed #253141;
+             border-radius:3px}
+
+  /* ---- holding: landed, no stand. The cost of a bad allocation. ---- */
+  #holdwrap{flex:0 0 auto;display:flex;flex-direction:column;gap:4px}
+  #holding{display:flex;gap:6px;min-height:40px;align-items:center;
+           border:1px solid #223040;border-radius:3px;padding:5px;background:#151c24}
+  .hold{display:flex;align-items:center;gap:6px;background:var(--panel);
+        border:1px solid var(--line);border-radius:3px;padding:5px 7px;touch-action:none}
+  .hold.late{border-color:var(--warn)}
+  .hold .cs{font-size:10px;color:var(--dim)}
+  #holdempty{color:#33404e;font-size:10px;letter-spacing:1.6px;padding-left:4px}
+
+  /* ---- stands ---- */
+  #gates{flex:1 1 30%;min-height:0;display:flex;flex-direction:column;gap:6px}
+  .gate{flex:1 1 0;min-height:56px;background:var(--stand);border:1px solid var(--line);
+        border-radius:3px;padding:7px 8px;display:flex;flex-direction:column;gap:5px;
+        position:relative;overflow:hidden}
+  .gate.drop{outline:2px solid var(--ok);outline-offset:-2px}
+  .gate.bad{outline:2px solid var(--warn);outline-offset:-2px}
+  .gate .top{display:flex;align-items:center;gap:8px}
+  .gate .gid{font-size:10px;letter-spacing:1.4px;color:var(--dim);min-width:52px}
+  .gate .far{font-size:9px;color:#5e7385;letter-spacing:1px}
+  .gate .cs{font-size:11px}
+  .gate .free{color:#3d4d5c;font-size:10px;letter-spacing:1.6px}
+  .gate .resv{color:var(--dim);font-size:10px;letter-spacing:1px;opacity:.8}
+  .bars{display:flex;flex-direction:column;gap:3px}
+  .bar{display:flex;align-items:center;gap:6px}
+  .bar .track{flex:1 1 auto;height:9px;background:#18222c;border:1px solid var(--line);
+              border-radius:2px;overflow:hidden}
+  .bar .fill{height:100%;width:0}
+  .pop{position:absolute;pointer-events:none;font-size:11px;color:var(--ok);
+       animation:pop .6s ease-out forwards}
+  @keyframes pop{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-18px)}}
+
+  /* ---- service tray: the drag SOURCE. Must never clip (§6). ---- */
+  #tray{flex:0 0 auto;display:flex;gap:8px;padding:8px;background:var(--panel);
+        border:1px solid var(--line);border-radius:3px;touch-action:none}
+  .tool{flex:1 1 0;display:flex;flex-direction:column;align-items:center;gap:3px;
+        padding:7px 0;background:#151d26;border:1px solid var(--line);border-radius:3px;
+        touch-action:none}
+  .tool.out{opacity:.25}
+  .tool .n{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .ic{width:26px;height:26px;display:block}
+  /* §4's condition is tested at 32px, but the NEED SET is what has to be read and
+     it renders at this size. At 17px the pump and the case are both "a filled
+     box" separated by one or two pixels of spout/handle — a wrong drag would be a
+     reading error, not a decision error, and §4 says that contaminates the
+     result. 22px restores the separation; the layout has the headroom. */
+  .ic.sm{width:22px;height:22px}
+  .f{color:var(--fuel)} .b{color:var(--bags)} .c{color:var(--cater)}
+  .met{opacity:.28}
+
+  /* ---- vehicles: coloured squares that move (§4) ---- */
+  #veh{position:fixed;inset:0;pointer-events:none;z-index:40}
+  .v{position:absolute;width:18px;height:18px;border-radius:2px;margin:-9px 0 0 -9px;
+     display:flex;align-items:center;justify-content:center;border:1px solid #0009}
+  .v.wait{animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:.5}}
+
+  /* ---- drag ghost ---- */
+  #ghost{position:fixed;z-index:60;pointer-events:none;opacity:.9;
+         transform:translate(-50%,-50%);display:none}
+
+  /* ---- screens ---- */
+  .screen{position:fixed;inset:0;z-index:80;background:#0d1217ee;display:flex;
+          flex-direction:column;align-items:center;justify-content:center;gap:14px;
+          padding:24px;text-align:center;overflow:auto}
+  .screen h1{font-size:22px;letter-spacing:3px}
+  .screen .sub{color:var(--dim);font-size:12px;letter-spacing:1px;line-height:1.7}
+  button{font:inherit;color:var(--ink);background:#22303d;border:1px solid var(--line);
+         border-radius:3px;padding:11px 18px;letter-spacing:1.5px;font-size:12px}
+  button.primary{background:#2c4256}
+  .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  #levels{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;width:100%;max-width:330px}
+  #levels button{padding:12px 0}
+  .ops{width:100%;max-width:330px;text-align:left;border-top:1px solid var(--line);
+       padding-top:10px;display:flex;flex-direction:column;gap:7px}
+  .ops label{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim);
+             letter-spacing:.6px;font-weight:600}
+  .ops input[type=checkbox]{width:16px;height:16px;accent-color:#4a7ea8}
+  .ops select{font:inherit;font-size:11px;background:#151d26;color:var(--ink);
+              border:1px solid var(--line);border-radius:2px;padding:3px 5px}
+  .hid{display:none !important}
+</style>
+</head>
+<body>
+
+<!-- Temporary art (§4): at most six icons in the whole game; this uses three.
+     Silhouette-legible with colour stripped — each is a distinct outline at 32px:
+     tall pump with a spout / wide case with a handle / domed cloche on a base. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-F" viewBox="0 0 32 32">
+    <path fill="currentColor" d="M5 4h13a2 2 0 0 1 2 2v22H3V6a2 2 0 0 1 2-2zm1 4v7h11V8H6zm16 2 4 4v10a2 2 0 0 0 4 0V12l-5-5-3 3z"/>
+  </symbol>
+  <symbol id="i-B" viewBox="0 0 32 32">
+    <path fill="currentColor" d="M12 3h8a3 3 0 0 1 3 3v3h-3V6h-8v3h-3V6a3 3 0 0 1 3-3zM4 11h24a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V13a2 2 0 0 1 2-2zm10 3v11h4V14h-4z"/>
+  </symbol>
+  <symbol id="i-C" viewBox="0 0 32 32">
+    <path fill="currentColor" d="M16 5a3 3 0 0 1 3 3v.6A9.5 9.5 0 0 1 26 18v2H6v-2a9.5 9.5 0 0 1 7-9.4V8a3 3 0 0 1 3-3zM2 22h28v4H2z"/>
+  </symbol>
+</defs></svg>
+
+<div id="app">
+  <div id="hud">
+    <div id="clock">0:00</div>
+    <div>
+      <div id="lvl">LEVEL —</div>
+      <div id="cond">—</div>
+    </div>
+    <div id="delaywrap">
+      <div class="cap">DELAY</div>
+      <div id="delaybar"><div id="delayfill"></div></div>
+      <div id="delaynum">0/8</div>
+    </div>
+  </div>
+
+  <div id="arrivals">
+    <div class="cap">ARRIVALS</div>
+    <div id="arrlist"></div>
+    <div id="blindnote" class="hid">NO ARRIVALS BOARD</div>
+  </div>
+
+  <div id="holdwrap">
+    <div class="cap">HOLDING</div>
+    <div id="holding"><span id="holdempty">APRON CLEAR</span></div>
+  </div>
+
+  <div id="gates"></div>
+
+  <div id="tray"></div>
+</div>
+
+<div id="veh"></div>
+<div id="ghost"></div>
+
+<!-- level select / operator screen: shown BETWEEN shifts only, never during -->
+<div id="menu" class="screen">
+  <h1>FLIGHT DISPATCH</h1>
+  <div class="sub">you run an airport apron</div>
+  <div id="levels"></div>
+  <div class="ops">
+    <label>TESTER
+      <select id="opTester"><option>A</option><option>B</option></select>
+      <span id="opAssign" style="opacity:.75"></span>
+    </label>
+    <label><input type="checkbox" id="opQV"> FORCE QUEUE_VISIBLE (override §5.4)</label>
+    <label><input type="checkbox" id="opLD" checked> LANE_DISTANCE_VARIES</label>
+    <label><input type="checkbox" id="opRB" checked> VEHICLE_RETURNS_TO_BASE</label>
+    <label><input type="checkbox" id="opPD" checked> PRE_DISPATCH [OPEN-FD5]</label>
+    <div class="row" style="justify-content:flex-start">
+      <button id="opCopy">COPY LOG</button>
+      <button id="opClear">CLEAR LOG</button>
+    </div>
+    <div id="opCount" style="font-size:10px;color:#4a5b6b;letter-spacing:1px"></div>
+  </div>
+</div>
+
+<div id="end" class="screen hid">
+  <h1 id="endTitle">SHIFT FAILED</h1>
+  <div class="sub" id="endSub"></div>
+  <div class="row">
+    <button class="primary" id="endRetry">RETRY</button>
+    <button id="endMenu">SHIFTS</button>
+  </div>
+</div>
+
+<!-- ============================ TEST CONTENT ============================
+  Ten hand-written timetables of rising density (§3). Drafted by Claude,
+  solvability-verified by proto/verify_solvability.py BEFORE any play.
+  AWAITING GIAN'S REVIEW AND SIGNATURE per [RULED FD3]. See proto/TIMETABLES.md.
+  eta/slack in seconds; needs: F fuel, B bags, C catering; type N narrow, W wide.
+====================================================================== -->
+<script type="application/json" id="timetables">
+[
+{"id":1,"name":"FIRST LIGHT","teaches":"reading a need set","scarce":"neither","lanes":1,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB101","type":"N","eta":4,"slack":30,"needs":["B"]},
+ {"cs":"GB118","type":"N","eta":24,"slack":30,"needs":["F","C"]},
+ {"cs":"GB140","type":"W","eta":46,"slack":30,"needs":["F","B"]}]},
+
+{"id":2,"name":"SETTLED","teaches":"the queue exists and is trustworthy","scarce":"neither","lanes":1,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB203","type":"N","eta":4,"slack":28,"needs":["C"]},
+ {"cs":"GB217","type":"N","eta":21,"slack":28,"needs":["B","C"]},
+ {"cs":"GB231","type":"W","eta":39,"slack":28,"needs":["F","B"]},
+ {"cs":"GB246","type":"N","eta":57,"slack":28,"needs":["F","C"]}]},
+
+{"id":3,"name":"TWO ON FINAL","teaches":"first real choice: two claimants, one stand","scarce":"gate","lanes":1,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB302","type":"N","eta":4,"slack":16,"needs":["C"]},
+ {"cs":"GB309","type":"W","eta":11,"slack":16,"needs":["F","B"]},
+ {"cs":"GB318","type":"N","eta":30,"slack":16,"needs":["B"]},
+ {"cs":"GB327","type":"N","eta":38,"slack":16,"needs":["F"]},
+ {"cs":"GB341","type":"W","eta":56,"slack":16,"needs":["F","C"]}]},
+
+{"id":4,"name":"ONE STAND","teaches":"ordering under a single stand","scarce":"gate","lanes":1,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB404","type":"N","eta":3,"slack":16,"needs":["B"]},
+ {"cs":"GB412","type":"N","eta":10,"slack":16,"needs":["C"]},
+ {"cs":"GB420","type":"W","eta":25,"slack":16,"needs":["F","C"]},
+ {"cs":"GB433","type":"N","eta":33,"slack":16,"needs":["B"]},
+ {"cs":"GB447","type":"W","eta":48,"slack":16,"needs":["F","B"]},
+ {"cs":"GB458","type":"N","eta":57,"slack":16,"needs":["C"]}]},
+
+{"id":5,"name":"BOTH STANDS","teaches":"gate scarcity under density","scarce":"gate","lanes":2,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB501","type":"N","eta":3,"slack":14,"needs":["B"]},
+ {"cs":"GB507","type":"W","eta":8,"slack":14,"needs":["F","C"]},
+ {"cs":"GB515","type":"N","eta":19,"slack":14,"needs":["C"]},
+ {"cs":"GB524","type":"N","eta":25,"slack":14,"needs":["F","B"]},
+ {"cs":"GB536","type":"W","eta":38,"slack":14,"needs":["F","B"]},
+ {"cs":"GB544","type":"N","eta":44,"slack":14,"needs":["C"]},
+ {"cs":"GB559","type":"W","eta":58,"slack":14,"needs":["F","B","C"]}]},
+
+{"id":6,"name":"BANK","teaches":"gate scarcity, no idle stand","scarce":"gate","lanes":2,"pool":{"F":2,"B":2,"C":2},"arrivals":[
+ {"cs":"GB602","type":"N","eta":2,"slack":14,"needs":["C"]},
+ {"cs":"GB606","type":"W","eta":6,"slack":14,"needs":["F","B"]},
+ {"cs":"GB614","type":"N","eta":15,"slack":14,"needs":["B"]},
+ {"cs":"GB621","type":"N","eta":20,"slack":14,"needs":["F","C"]},
+ {"cs":"GB630","type":"W","eta":31,"slack":14,"needs":["F","B"]},
+ {"cs":"GB638","type":"N","eta":36,"slack":14,"needs":["C"]},
+ {"cs":"GB649","type":"W","eta":48,"slack":14,"needs":["F","B","C"]},
+ {"cs":"GB655","type":"N","eta":54,"slack":14,"needs":["B"]},
+ {"cs":"GB667","type":"N","eta":66,"slack":14,"needs":["F","C"]}]},
+
+{"id":7,"name":"ONE FUEL TRUCK","teaches":"the same layer on the other resource","scarce":"vehicle","lanes":2,"pool":{"F":1,"B":1,"C":1},"arrivals":[
+ {"cs":"GB703","type":"N","eta":3,"slack":18,"needs":["F"]},
+ {"cs":"GB709","type":"W","eta":9,"slack":18,"needs":["B"]},
+ {"cs":"GB720","type":"N","eta":20,"slack":18,"needs":["C"]},
+ {"cs":"GB728","type":"W","eta":28,"slack":18,"needs":["F","C"]},
+ {"cs":"GB740","type":"N","eta":40,"slack":18,"needs":["B"]},
+ {"cs":"GB748","type":"W","eta":48,"slack":18,"needs":["F","B"]},
+ {"cs":"GB760","type":"N","eta":60,"slack":18,"needs":["F"]}]},
+
+{"id":8,"name":"SHARED TRUCKS","teaches":"vehicle scarcity under density","scarce":"vehicle","lanes":2,"pool":{"F":1,"B":1,"C":1},"arrivals":[
+ {"cs":"GB802","type":"N","eta":2,"slack":16,"needs":["F"]},
+ {"cs":"GB808","type":"W","eta":8,"slack":16,"needs":["C"]},
+ {"cs":"GB817","type":"N","eta":17,"slack":16,"needs":["B"]},
+ {"cs":"GB824","type":"W","eta":24,"slack":16,"needs":["F","B"]},
+ {"cs":"GB834","type":"N","eta":34,"slack":16,"needs":["C"]},
+ {"cs":"GB841","type":"W","eta":41,"slack":16,"needs":["F","B"]},
+ {"cs":"GB852","type":"N","eta":52,"slack":16,"needs":["C"]},
+ {"cs":"GB859","type":"N","eta":59,"slack":16,"needs":["B"]},
+ {"cs":"GB870","type":"W","eta":70,"slack":16,"needs":["F","C"]}]},
+
+{"id":9,"name":"MIXED","teaches":"mixed scarcity; the queue must be read","scarce":"both","lanes":2,"pool":{"F":1,"B":1,"C":1},"arrivals":[
+ {"cs":"GB906","type":"W","eta":6,"slack":20,"needs":["B","C"]},
+ {"cs":"GB909","type":"W","eta":9,"slack":20,"needs":["F","C"]},
+ {"cs":"GB918","type":"N","eta":18,"slack":20,"needs":["B"]},
+ {"cs":"GB929","type":"N","eta":29,"slack":20,"needs":["C"]},
+ {"cs":"GB932","type":"W","eta":32,"slack":20,"needs":["F","C"]},
+ {"cs":"GB935","type":"N","eta":35,"slack":20,"needs":["B"]},
+ {"cs":"GB938","type":"N","eta":38,"slack":20,"needs":["B"]},
+ {"cs":"GB955","type":"N","eta":55,"slack":20,"needs":["F"]},
+ {"cs":"GB960","type":"N","eta":60,"slack":20,"needs":["B"]}]},
+
+{"id":10,"name":"FULL APRON","teaches":"survive on the queue alone","scarce":"both","lanes":2,"pool":{"F":1,"B":1,"C":1},"arrivals":[
+ {"cs":"GB1004","type":"W","eta":4,"slack":19,"needs":["F","C"]},
+ {"cs":"GB1007","type":"N","eta":7,"slack":19,"needs":["B"]},
+ {"cs":"GB1010","type":"W","eta":10,"slack":19,"needs":["F","C"]},
+ {"cs":"GB1035","type":"N","eta":35,"slack":19,"needs":["B"]},
+ {"cs":"GB1040","type":"W","eta":40,"slack":19,"needs":["B","C"]},
+ {"cs":"GB1053","type":"N","eta":53,"slack":19,"needs":["B"]},
+ {"cs":"GB1056","type":"N","eta":56,"slack":19,"needs":["C"]},
+ {"cs":"GB1064","type":"N","eta":64,"slack":19,"needs":["F"]},
+ {"cs":"GB1068","type":"N","eta":68,"slack":19,"needs":["C"]},
+ {"cs":"GB1071","type":"N","eta":71,"slack":19,"needs":["B"]},
+ {"cs":"GB1078","type":"N","eta":78,"slack":19,"needs":["C"]}]}
+]
+</script>
+
+<script>
+"use strict";
+/* =====================================================================
+   RULES — mirrored by proto/verify_solvability.py
+   ===================================================================== */
+const SERVICES = {F:12, B:9, C:6};        // seconds
+const SRV_ORDER = ["F","B","C"];
+const SRV_CLASS = {F:"f", B:"b", C:"c"};
+const FAIL_AT   = 8;                      // §2's mock: DELAY x/8
+const DELAY_RATE= 0.25;                   // delay units per second per overdue aircraft
+const FLAT_TRAVEL = 3;                    // §5.1 null configuration
+const LANE_NEAR = 2, LANE_FAR = 5;        // §5.1 LANE_DISTANCE_VARIES
+const QUEUE_SHOWN = 4;                    // §2: 3-4 announced arrivals
+
+/* §5 switches. QUEUE_VISIBLE is not a plain boolean: §5.4 assigns it per level
+   and counterbalances it across testers. */
+const CFG = {
+  LANE_DISTANCE_VARIES: true,
+  VEHICLE_RETURNS_TO_BASE: true,
+  PRE_DISPATCH: true,        // [OPEN-FD5] — see proto/TIMETABLES.md
+  FORCE_QUEUE_VISIBLE: false,
+  TESTER: "A",
+};
+
+/* §5.4: tester A plays odd levels blind and even levels announced; tester B is
+   flipped, so the density ramp and practice effects fall on both conditions
+   equally across the cohort. Ten shifts, not twenty. */
+function queueVisibleFor(level, tester){
+  if (CFG.FORCE_QUEUE_VISIBLE) return true;
+  const evenAnnounced = (tester === "A");
+  const isEven = (level % 2 === 0);
+  return isEven === evenAnnounced;
+}
+
+const TIMETABLES = JSON.parse(document.getElementById("timetables").textContent);
+
+/* =====================================================================
+   EVENT LOG — localStorage + copy-to-clipboard dump (§6). No backend.
+   Logs input timestamps and the visible state at each decision: the GAPS
+   between inputs are what a pause looks like in data.
+   ===================================================================== */
+const LOG_KEY = "fd_proto_log_v1";
+let logBuf = [];
+function loadLog(){ try{ return JSON.parse(localStorage.getItem(LOG_KEY)||"[]"); }catch(e){ return []; } }
+function saveLog(){ try{ localStorage.setItem(LOG_KEY, JSON.stringify(logBuf)); }catch(e){} }
+function ev(type, data){
+  const e = Object.assign({
+    t: G ? +G.t.toFixed(2) : 0,
+    wall: Date.now(),
+    tester: CFG.TESTER,
+    lvl: G ? G.tt.id : null,
+    att: G ? G.attempt : null,
+    qv: G ? G.queueVisible : null,
+    type
+  }, data||{});
+  logBuf.push(e); saveLog();
+}
+function snapshot(){
+  if(!G) return {};
+  return {
+    hold: G.ac.filter(a=>a.st==="holding").map(a=>a.cs),
+    gates: G.gate.map(g=> g.ac===null ? (g.resv!==null? "R:"+G.ac[g.resv].cs : "-") : G.ac[g.ac].cs),
+    queue: G.queueVisible ? G.ac.filter(a=>a.st==="queued").slice(0,QUEUE_SHOWN).map(a=>a.cs) : null,
+    delay: +G.delay.toFixed(2)
+  };
+}
+
+/* =====================================================================
+   GAME STATE
+   ===================================================================== */
+let G = null;        // null between shifts
+let raf = null;
+
+function travel(from, to, lanes){
+  // positions: -1 = tray/base, 0..n = stand index
+  if(!CFG.LANE_DISTANCE_VARIES) return from === to ? 0 : FLAT_TRAVEL;
+  const d = p => p === -1 ? 0 : (lanes === 1 ? LANE_NEAR : (p === 0 ? LANE_NEAR : LANE_FAR));
+  return Math.abs(d(from) - d(to));
+}
+
+function startShift(levelId, attempt){
+  const tt = TIMETABLES.find(t=>t.id===levelId);
+  const qv = queueVisibleFor(levelId, CFG.TESTER);
+  G = {
+    tt, t:0, started:false, delay:0, over:null,
+    attempt: attempt||1,
+    queueVisible: qv,
+    ac: tt.arrivals.map((a,i)=>({
+      i, cs:a.cs, type:a.type, eta:a.eta, slack:a.slack,
+      needs:a.needs.slice(), done:{}, st:"queued", gate:-1,
+      dl: a.eta + a.slack
+    })),
+    gate: Array.from({length: tt.lanes}, ()=>({ac:null, resv:null})),
+    units: {},          // srv -> [{free:0, pos:-1}]
+    jobs: [],           // {fin, ac, srv, unit, start}
+    pend: [],           // {ready, gate, srv, unit, start, from}
+    vis: [],            // moving vehicle sprites
+    struct: 0
+  };
+  for(const s of SRV_ORDER){
+    const n = tt.pool[s]||0;
+    G.units[s] = Array.from({length:n}, ()=>({free:0, pos:-1}));
+  }
+  document.getElementById("menu").classList.add("hid");
+  document.getElementById("end").classList.add("hid");
+  buildStatic();
+  ev("shift_start", {level:levelId, name:tt.name, lanes:tt.lanes, pool:tt.pool,
+                     attempt:G.attempt, queue_visible:qv,
+                     cfg:{LD:CFG.LANE_DISTANCE_VARIES, RB:CFG.VEHICLE_RETURNS_TO_BASE,
+                          PD:CFG.PRE_DISPATCH}});
+  if(raf) cancelAnimationFrame(raf);
+  lastFrame = null;
+  raf = requestAnimationFrame(frame);
+}
+
+/* ---- the clock starts on the FIRST RENDERED FRAME, not on load (§6) ---- */
+let lastFrame = null;
+function frame(now){
+  if(!G){ return; }
+  if(!G.started){
+    G.started = true; lastFrame = now;
+    ev("first_frame", {}); // the zero of the shift clock
+    render();
+    raf = requestAnimationFrame(frame);
+    return;
+  }
+  let dt = (now - lastFrame)/1000;
+  lastFrame = now;
+  if(dt > 0.5) dt = 0.5;            // tab was backgrounded; do not fast-forward
+  if(!G.over) step(dt);
+  render();
+  raf = requestAnimationFrame(frame);
+}
+
+function step(dt){
+  // delay accrues for every aircraft that is down, not gone, and past its deadline
+  let overdue = 0;
+  for(const a of G.ac) if(a.st!=="gone" && a.st!=="queued" && G.t >= a.dl) overdue++;
+  G.delay += overdue * DELAY_RATE * dt;
+  G.t += dt;
+
+  for(const a of G.ac){
+    if(a.st==="queued" && G.t >= a.eta){ a.st="holding"; G.struct++; ev("land",{cs:a.cs}); }
+  }
+  for(let k=G.jobs.length-1;k>=0;k--){
+    const j = G.jobs[k];
+    if(G.t >= j.fin){
+      G.jobs.splice(k,1);
+      const a = G.ac[j.ac];
+      a.done[j.srv] = true;
+      pop(a.gate, j.srv);
+      ev("serviced", {cs:a.cs, srv:j.srv});
+      const u = G.units[j.srv][j.unit];
+      if(CFG.VEHICLE_RETURNS_TO_BASE){
+        const back = travel(a.gate, -1, G.tt.lanes);
+        u.free = G.t + back; u.pos = -1;
+        moveVeh(j.srv, j.unit, a.gate, -1, G.t, G.t+back, false);
+      } else {
+        u.free = G.t; u.pos = a.gate;
+      }
+      if(unmet(a).length===0) depart(a);
+      G.struct++;
+    }
+  }
+  seat();
+  collectStaged();
+  if(G.delay >= FAIL_AT) finish(false);
+  else if(G.ac.every(a=>a.st==="gone")) finish(true);
+}
+
+function unmet(a){ return a.needs.filter(s=>!a.done[s]); }
+
+function depart(a){
+  const g = a.gate;
+  G.gate[g].ac = null;
+  a.st = "gone"; a.gate = -1;
+  ev("depart", {cs:a.cs, late:+Math.max(0, G.t - a.dl).toFixed(1)});
+  G.struct++;
+}
+
+function seat(){
+  for(let g=0; g<G.gate.length; g++){
+    const G_ = G.gate[g];
+    if(G_.ac !== null) continue;
+    if(G_.resv !== null && G.ac[G_.resv].st === "holding"){
+      const a = G.ac[G_.resv];
+      G_.ac = a.i; G_.resv = null;
+      a.st = "at_gate"; a.gate = g;
+      ev("seat", {cs:a.cs, gate:g});
+      G.struct++;
+    }
+  }
+}
+
+/* A pre-dispatched vehicle starts work the moment the aircraft it was staged
+   for is on the stand and wants it. If the aircraft turns out not to need it,
+   the vehicle is simply free where it stands — the cost of a wrong
+   pre-dispatch is the wasted trip. */
+function collectStaged(){
+  for(let k=G.pend.length-1;k>=0;k--){
+    const p = G.pend[k];
+    if(G.t < p.ready) continue;
+    const ai = G.gate[p.gate].ac;
+    if(ai === null) continue;
+    G.pend.splice(k,1);
+    const a = G.ac[ai];
+    const running = new Set(G.jobs.filter(j=>j.ac===ai).map(j=>j.srv));
+    if(unmet(a).includes(p.srv) && !running.has(p.srv)){
+      const fin = G.t + SERVICES[p.srv];
+      G.jobs.push({fin, ac:ai, srv:p.srv, unit:p.unit, start:G.t});
+      G.units[p.srv][p.unit].free = fin;
+      ev("staged_start", {cs:a.cs, srv:p.srv});
+    } else {
+      G.units[p.srv][p.unit].free = G.t;
+      G.units[p.srv][p.unit].pos = p.gate;
+      ev("staged_wasted", {gate:p.gate, srv:p.srv});
+    }
+    setVehIdle(p.srv, p.unit, p.gate);
+    G.struct++;
+  }
+}
+
+function finish(cleared){
+  G.over = cleared ? "clear" : "fail";
+  ev("shift_end", {outcome:G.over, shift_s:+G.t.toFixed(1),
+                   delay:+G.delay.toFixed(2),
+                   remaining:G.ac.filter(a=>a.st!=="gone").length});
+  const t = document.getElementById("endTitle");
+  const s = document.getElementById("endSub");
+  t.textContent = cleared ? "SHIFT CLEAR" : "SHIFT FAILED";
+  t.style.color = cleared ? "var(--ok)" : "var(--warn)";
+  s.textContent = cleared
+    ? fmt(G.t) + "   ·   delay " + G.delay.toFixed(1) + "/8"
+    : "";
+  document.getElementById("end").classList.remove("hid");
+}
+
+/* =====================================================================
+   PLAYER ACTIONS — drag is the only physical verb (§1)
+   ===================================================================== */
+function canAssign(ai, g){
+  const a = G.ac[ai], gt = G.gate[g];
+  if(G.over) return false;
+  if(gt.ac !== null || gt.resv !== null) return false;
+  if(a.st === "at_gate" || a.st === "gone") return false;
+  if(a.st === "queued" && !G.queueVisible) return false;
+  return true;
+}
+function doAssign(ai, g){
+  const a = G.ac[ai];
+  G.gate[g].resv = ai;
+  ev("assign", Object.assign({cs:a.cs, gate:g, from:a.st}, {state:snapshot()}));
+  seat();
+  G.struct++;
+}
+
+/* nearest free unit — matches verify_solvability.py's unit choice */
+function freeUnit(srv, g){
+  const us = G.units[srv];
+  let best = -1, bestD = Infinity;
+  for(let u=0; u<us.length; u++){
+    if(us[u].free > G.t) continue;
+    const d = g === undefined ? 0 : travel(us[u].pos, g, G.tt.lanes);
+    if(d < bestD){ bestD = d; best = u; }
+  }
+  return best;
+}
+function canService(srv, g){
+  if(G.over) return false;
+  if(freeUnit(srv) < 0) return false;
+  const gt = G.gate[g];
+  if(gt.ac !== null){
+    const a = G.ac[gt.ac];
+    const running = new Set(G.jobs.filter(j=>j.ac===a.i).map(j=>j.srv));
+    return unmet(a).includes(srv) && !running.has(srv);
+  }
+  // stage ahead of an announced aircraft
+  if(CFG.PRE_DISPATCH && G.queueVisible && gt.resv !== null
+     && G.ac[gt.resv].st === "queued"){
+    return !G.pend.some(p=>p.gate===g && p.srv===srv);
+  }
+  return false;
+}
+function doService(srv, g){
+  const unit = freeUnit(srv, g);
+  const u = G.units[srv][unit];
+  const trav = travel(u.pos, g, G.tt.lanes);
+  const gt = G.gate[g];
+  const from = u.pos;
+  u.pos = g;
+  if(gt.ac !== null){
+    const a = G.ac[gt.ac];
+    const fin = G.t + trav + SERVICES[srv];
+    G.jobs.push({fin, ac:a.i, srv, unit, start:G.t + trav});
+    u.free = fin;
+    ev("dispatch", {cs:a.cs, srv, gate:g, travel:trav, state:snapshot()});
+    moveVeh(srv, unit, from, g, G.t, G.t+trav, true);
+  } else {
+    G.pend.push({ready:G.t + trav, gate:g, srv, unit, start:G.t, from});
+    u.free = 1e9;                        // committed until collected
+    ev("stage", {srv, gate:g, forCs:G.ac[gt.resv].cs, travel:trav, state:snapshot()});
+    moveVeh(srv, unit, from, g, G.t, G.t+trav, true);
+  }
+  G.struct++;
+}
+
+/* =====================================================================
+   VEHICLES — coloured squares that move (§4). Driven by sim time, so what
+   the player sees is the truck's real position, not a decorative tween.
+   ===================================================================== */
+const vehLayer = document.getElementById("veh");
+function vehKey(srv, unit){ return srv + unit; }
+function vehEl(srv, unit){
+  let el = vehLayer.querySelector('[data-v="'+vehKey(srv,unit)+'"]');
+  if(!el){
+    el = document.createElement("div");
+    el.className = "v";
+    el.dataset.v = vehKey(srv,unit);
+    el.style.background = srv==="F" ? "var(--fuel)" : srv==="B" ? "var(--bags)" : "var(--cater)";
+    vehLayer.appendChild(el);
+  }
+  return el;
+}
+function anchor(pos){
+  // pos -1 = tray slot for that service; otherwise the stand
+  const r = pos === -1
+    ? document.getElementById("tray").getBoundingClientRect()
+    : (document.querySelector('.gate[data-gate="'+pos+'"]')||document.getElementById("tray")).getBoundingClientRect();
+  return {x: r.left + r.width*0.5, y: r.top + r.height*0.5};
+}
+function moveVeh(srv, unit, from, to, t0, t1, staying){
+  const v = G.vis.filter(v=>v.key===vehKey(srv,unit));
+  v.forEach(x=>G.vis.splice(G.vis.indexOf(x),1));
+  G.vis.push({key:vehKey(srv,unit), srv, unit, from, to, t0, t1, staying});
+}
+function setVehIdle(srv, unit, pos){
+  const e = vehEl(srv, unit);
+  e.classList.remove("wait");
+}
+function renderVeh(){
+  const seen = new Set();
+  for(const v of G.vis){
+    const el = vehEl(v.srv, v.unit);
+    const a = anchor(v.from), b = anchor(v.to);
+    const k = v.t1 <= v.t0 ? 1 : Math.max(0, Math.min(1, (G.t - v.t0)/(v.t1 - v.t0)));
+    el.style.left = (a.x + (b.x-a.x)*k) + "px";
+    el.style.top  = (a.y + (b.y-a.y)*k) + "px";
+    el.style.display = (v.to === -1 && k >= 1) ? "none" : "flex";
+    const waiting = k >= 1 && G.pend.some(p=>p.srv===v.srv && p.unit===v.unit);
+    el.classList.toggle("wait", waiting);
+    seen.add(v.key);
+  }
+  vehLayer.querySelectorAll(".v").forEach(el=>{
+    if(!seen.has(el.dataset.v)) el.style.display = "none";
+  });
+}
+function pop(g, srv){
+  const gate = document.querySelector('.gate[data-gate="'+g+'"]');
+  if(!gate) return;
+  const d = document.createElement("div");
+  d.className = "pop"; d.textContent = "✓";
+  d.style.right = "10px"; d.style.top = "8px";
+  gate.appendChild(d);
+  setTimeout(()=>d.remove(), 620);
+}
+
+/* =====================================================================
+   RENDER
+   ===================================================================== */
+const el = id => document.getElementById(id);
+function icon(srv, extra){
+  return '<svg class="ic sm '+SRV_CLASS[srv]+(extra||"")+'"><use href="#i-'+srv+'"/></svg>';
+}
+function fmt(t){
+  const m = Math.floor(t/60), s = Math.floor(t%60);
+  return m + ":" + String(s).padStart(2,"0");
+}
+
+function buildStatic(){
+  // stands
+  const gwrap = el("gates");
+  gwrap.innerHTML = "";
+  for(let g=0; g<G.tt.lanes; g++){
+    const d = document.createElement("div");
+    d.className = "gate"; d.dataset.gate = g;
+    gwrap.appendChild(d);
+  }
+  // service tray — the drag source
+  const tray = el("tray");
+  tray.innerHTML = "";
+  for(const s of SRV_ORDER){
+    const n = G.tt.pool[s]||0;
+    if(n === 0) continue;
+    const d = document.createElement("div");
+    d.className = "tool"; d.dataset.srv = s;
+    d.innerHTML = '<svg class="ic '+SRV_CLASS[s]+'"><use href="#i-'+s+'"/></svg>'
+                + '<div class="n" data-n="'+s+'">'+n+'</div>';
+    tray.appendChild(d);
+  }
+  el("blindnote").classList.toggle("hid", G.queueVisible);
+  el("arrlist").classList.toggle("hid", !G.queueVisible);
+  el("lvl").textContent = "LEVEL " + G.tt.id + " · " + G.tt.name;
+  // operator-only: naming the condition on the play screen would tell the tester
+  // exactly what §5.4 forbids the observer from saying
+  el("cond").textContent = OPERATOR
+    ? (G.queueVisible ? "ANNOUNCED" : "BLIND") + " · tester " + CFG.TESTER
+      + " · try " + G.attempt
+    : "";
+  G.struct++;
+  G._lastStruct = -1;
+}
+
+function render(){
+  el("clock").textContent = fmt(G.t);
+  const pct = Math.min(1, G.delay/FAIL_AT);
+  el("delayfill").style.width = (pct*100).toFixed(1) + "%";
+  el("delaynum").textContent = Math.floor(G.delay) + "/" + FAIL_AT;
+
+  if(G.struct !== G._lastStruct){ G._lastStruct = G.struct; rebuild(); }
+
+  // per-frame numbers: countdowns and filling bars
+  if(G.queueVisible){
+    el("arrlist").querySelectorAll(".arr").forEach(node=>{
+      const a = G.ac[+node.dataset.ac];
+      node.querySelector(".eta").textContent = "T-" + Math.max(0, Math.ceil(a.eta - G.t));
+    });
+  }
+  document.querySelectorAll(".bar .fill").forEach(f=>{
+    const ai = +f.dataset.ac, srv = f.dataset.srv;
+    const a = G.ac[ai];
+    let k = a.done[srv] ? 1 : 0;
+    const j = G.jobs.find(j=>j.ac===ai && j.srv===srv);
+    if(j) k = Math.max(0, Math.min(1, (G.t - j.start)/SERVICES[srv]));
+    f.style.width = (k*100).toFixed(1) + "%";
+  });
+  document.querySelectorAll(".tool").forEach(t=>{
+    const s = t.dataset.srv;
+    const n = G.units[s].filter(u=>u.free <= G.t).length;
+    t.querySelector('[data-n="'+s+'"]').textContent = n;
+    t.classList.toggle("out", n === 0);
+  });
+  document.querySelectorAll(".hold").forEach(h=>{
+    const a = G.ac[+h.dataset.ac];
+    h.classList.toggle("late", G.t >= a.dl);
+  });
+  renderVeh();
+}
+
+function rebuild(){
+  // announced queue: the information the test is about
+  if(G.queueVisible){
+    const list = el("arrlist");
+    const q = G.ac.filter(a=>a.st==="queued").slice(0, QUEUE_SHOWN);
+    list.innerHTML = q.map(a=>
+      '<div class="arr" data-ac="'+a.i+'" data-drag="ac">'
+      + '<div class="eta">T-'+Math.max(0,Math.ceil(a.eta-G.t))+'</div>'
+      + '<div class="cs">'+a.cs+'</div>'
+      + '<div class="hull '+a.type+'"></div>'
+      + '<div class="needs">'+a.needs.map(s=>icon(s)).join("")+'</div>'
+      + '</div>').join("");
+  }
+  // holding
+  const hold = G.ac.filter(a=>a.st==="holding");
+  const hw = el("holding");
+  hw.innerHTML = hold.length === 0
+    ? '<span id="holdempty">APRON CLEAR</span>'
+    : hold.map(a=>
+        '<div class="hold" data-ac="'+a.i+'" data-drag="ac">'
+        + '<div class="hull '+a.type+'"></div>'
+        + '<div class="cs">'+a.cs+'</div>'
+        + '<div class="needs">'+a.needs.map(s=>icon(s)).join("")+'</div>'
+        + '</div>').join("");
+
+  // stands
+  for(let g=0; g<G.tt.lanes; g++){
+    const node = document.querySelector('.gate[data-gate="'+g+'"]');
+    const gt = G.gate[g];
+    const far = (G.tt.lanes > 1 && g > 0 && CFG.LANE_DISTANCE_VARIES);
+    let html = '<div class="top"><div class="gid">STAND '+(g+1)+'</div>'
+             + (far ? '<div class="far">FAR</div>' : '');
+    if(gt.ac !== null){
+      const a = G.ac[gt.ac];
+      html += '<div class="hull '+a.type+'"></div><div class="cs">'+a.cs+'</div></div>'
+           + '<div class="bars">'
+           + a.needs.map(s=>
+               '<div class="bar">'+icon(s, a.done[s] ? "" : " met")
+               + '<div class="track"><div class="fill '+SRV_CLASS[s]+'" data-ac="'+a.i
+               + '" data-srv="'+s+'" style="background:currentColor"></div></div></div>'
+             ).join("")
+           + '</div>';
+    } else if(gt.resv !== null){
+      const a = G.ac[gt.resv];
+      html += '<div class="resv">HELD FOR '+a.cs+'</div></div>';
+      const staged = G.pend.filter(p=>p.gate===g).map(p=>icon(p.srv)).join("");
+      if(staged) html += '<div class="bars"><div class="bar">'+staged+'</div></div>';
+    } else {
+      html += '<div class="free">FREE</div></div>';
+    }
+    node.innerHTML = html;
+  }
+}
+
+/* =====================================================================
+   DRAG — pointer events, no page scroll, no native gestures
+   ===================================================================== */
+const ghost = el("ghost");
+let drag = null;
+
+function onDown(e){
+  if(!G || G.over) return;
+  const src = e.target.closest('[data-drag="ac"], .tool');
+  if(!src) return;
+  e.preventDefault();
+  if(src.classList.contains("tool")){
+    const srv = src.dataset.srv;
+    if(G.units[srv].filter(u=>u.free <= G.t).length === 0) return;
+    drag = {kind:"srv", srv, t0:performance.now()};
+    ghost.innerHTML = '<svg class="ic '+SRV_CLASS[srv]+'" style="width:34px;height:34px">'
+                    + '<use href="#i-'+srv+'"/></svg>';
+  } else {
+    const ai = +src.dataset.ac;
+    drag = {kind:"ac", ai, t0:performance.now()};
+    src.classList.add("grab");
+    const a = G.ac[ai];
+    ghost.innerHTML = '<div class="hull '+a.type+'" style="height:18px"></div>';
+  }
+  ghost.style.display = "block";
+  moveGhost(e);
+  ev("drag_start", {kind:drag.kind, what: drag.kind==="srv" ? drag.srv : G.ac[drag.ai].cs,
+                    state:snapshot()});
+}
+function moveGhost(e){
+  ghost.style.left = e.clientX + "px";
+  ghost.style.top  = e.clientY + "px";
+}
+function onMove(e){
+  if(!drag) return;
+  e.preventDefault();
+  moveGhost(e);
+  const g = gateUnder(e);
+  document.querySelectorAll(".gate").forEach(n=>n.classList.remove("drop","bad"));
+  if(g !== null){
+    const ok = drag.kind === "srv" ? canService(drag.srv, g) : canAssign(drag.ai, g);
+    document.querySelector('.gate[data-gate="'+g+'"]').classList.add(ok ? "drop" : "bad");
+  }
+}
+function gateUnder(e){
+  ghost.style.display = "none";
+  const n = document.elementFromPoint(e.clientX, e.clientY);
+  ghost.style.display = "block";
+  const gate = n && n.closest ? n.closest(".gate") : null;
+  return gate ? +gate.dataset.gate : null;
+}
+function onUp(e){
+  if(!drag) return;
+  e.preventDefault();
+  const g = gateUnder(e);
+  ghost.style.display = "none";
+  document.querySelectorAll(".gate").forEach(n=>n.classList.remove("drop","bad"));
+  document.querySelectorAll(".grab").forEach(n=>n.classList.remove("grab"));
+  const held = +(performance.now() - drag.t0).toFixed(0);
+  if(g === null){
+    ev("drag_abort", {kind:drag.kind, held_ms:held});
+  } else if(drag.kind === "srv"){
+    if(canService(drag.srv, g)) doService(drag.srv, g);
+    else ev("drag_refused", {kind:"srv", srv:drag.srv, gate:g, held_ms:held});
+  } else {
+    if(canAssign(drag.ai, g)) doAssign(drag.ai, g);
+    else ev("drag_refused", {kind:"ac", cs:G.ac[drag.ai].cs, gate:g, held_ms:held});
+  }
+  drag = null;
+}
+document.addEventListener("pointerdown", onDown, {passive:false});
+document.addEventListener("pointermove", onMove, {passive:false});
+document.addEventListener("pointerup", onUp, {passive:false});
+document.addEventListener("pointercancel", ()=>{
+  if(drag){ ev("drag_cancel", {}); drag=null; ghost.style.display="none";
+            document.querySelectorAll(".grab").forEach(n=>n.classList.remove("grab")); }
+});
+// suppress the browser's own gestures: an accidental scroll mid-drag is a ruined trial
+["gesturestart","gesturechange","contextmenu","dblclick"].forEach(t=>
+  document.addEventListener(t, e=>e.preventDefault(), {passive:false}));
+// ...but not on the operator screens, which may need to scroll on a short phone
+document.addEventListener("touchmove", e=>{
+  if(e.target.closest && e.target.closest(".screen")) return;
+  e.preventDefault();
+}, {passive:false});
+document.addEventListener("visibilitychange", ()=>{ if(G) ev("visibility", {hidden:document.hidden}); });
+
+/* =====================================================================
+   SHELL — level select, operator switches, log dump
+   ===================================================================== */
+/* The operator panel and the per-level condition labels are for the OBSERVER, and
+   they are poison in a tester's hands: §5.4 requires that nothing tells the player
+   which condition a level is in, and a button reading "BLIND" does exactly that.
+   Hidden unless the URL carries ?op — the tester's link has no query string, so
+   they see level numbers and nothing else. No build step, still one file. */
+const OPERATOR = new URLSearchParams(location.search).has("op");
+if(!OPERATOR){
+  document.querySelector(".ops").classList.add("hid");
+}
+
+const attempts = {};
+function openMenu(){
+  if(raf) cancelAnimationFrame(raf);
+  raf = null; G = null;
+  el("end").classList.add("hid");
+  el("menu").classList.remove("hid");
+  drawMenu();
+}
+function drawMenu(){
+  const wrap = el("levels");
+  wrap.innerHTML = TIMETABLES.map(t=>{
+    const qv = queueVisibleFor(t.id, CFG.TESTER);
+    const tag = OPERATOR
+      ? '<div style="font-size:8px;letter-spacing:1px;color:'
+        + (qv ? "#8ba0b3" : "#4a5b6b") + '">' + (qv ? "ANN" : "BLIND") + '</div>'
+      : "";
+    return '<button data-lv="'+t.id+'">'+t.id+tag+'</button>';
+  }).join("");
+  el("opAssign").textContent = CFG.TESTER === "A"
+    ? "(odd blind / even announced)" : "(odd announced / even blind)";
+  el("opCount").textContent = logBuf.length + " events logged";
+}
+el("levels").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  const lv = +b.dataset.lv;
+  attempts[lv] = (attempts[lv]||0) + 1;
+  startShift(lv, attempts[lv]);
+});
+el("endRetry").addEventListener("click", ()=>{
+  const lv = G.tt.id;
+  attempts[lv] = (attempts[lv]||0) + 1;
+  ev("retry", {level:lv});
+  startShift(lv, attempts[lv]);
+});
+el("endMenu").addEventListener("click", openMenu);
+el("opTester").addEventListener("change", e=>{ CFG.TESTER = e.target.value; drawMenu(); });
+el("opQV").addEventListener("change", e=>{ CFG.FORCE_QUEUE_VISIBLE = e.target.checked; drawMenu(); });
+el("opLD").addEventListener("change", e=>{ CFG.LANE_DISTANCE_VARIES = e.target.checked; });
+el("opRB").addEventListener("change", e=>{ CFG.VEHICLE_RETURNS_TO_BASE = e.target.checked; });
+el("opPD").addEventListener("change", e=>{ CFG.PRE_DISPATCH = e.target.checked; });
+el("opCopy").addEventListener("click", async ()=>{
+  const text = logBuf.map(e=>JSON.stringify(e)).join("\n");
+  try{ await navigator.clipboard.writeText(text); el("opCopy").textContent = "COPIED"; }
+  catch(err){
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand("copy"); el("opCopy").textContent = "COPIED"; }
+    catch(e2){ el("opCopy").textContent = "SELECT + COPY"; ta.style.cssText =
+      "position:fixed;inset:10% 5%;z-index:99;width:90%;height:70%"; return; }
+    ta.remove();
+  }
+  setTimeout(()=>el("opCopy").textContent = "COPY LOG", 1200);
+});
+el("opClear").addEventListener("click", ()=>{
+  if(!confirm("Clear the event log? Results are append-only by protocol.")) return;
+  logBuf = []; saveLog(); drawMenu();
+});
+
+logBuf = loadLog();
+drawMenu();
+</script>
+</body>
+</html>
