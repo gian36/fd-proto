@@ -214,6 +214,20 @@
   <h1>FLIGHT DISPATCH</h1>
   <div class="sub">you run an airport apron</div>
   <div id="levels"></div>
+
+  <!-- COPY LOG belongs to the TESTER, not the operator: a remote tester is the
+       one who has to export the session. It lived inside .ops until 2026-10-08
+       and was hidden along with it, which left every tester without the link
+       unable to send anything back. CLEAR LOG stays operator-only — a tester
+       hitting it destroys the session. -->
+  <div class="row" style="width:100%;max-width:330px">
+    <button class="primary" id="opSave" style="flex:1 1 auto">SAVE LOG</button>
+    <button id="opCopy" style="flex:0 0 auto">COPY</button>
+  </div>
+  <div class="sub" id="copyHint" style="font-size:11px;max-width:330px">
+    when you are done, press SAVE LOG and send me the file
+  </div>
+
   <div class="ops">
     <label>TESTER
       <select id="opTester"><option>A</option><option>B</option></select>
@@ -224,7 +238,6 @@
     <label><input type="checkbox" id="opRB" checked> VEHICLE_RETURNS_TO_BASE</label>
     <label><input type="checkbox" id="opPD" checked> PRE_DISPATCH [OPEN-FD5]</label>
     <div class="row" style="justify-content:flex-start">
-      <button id="opCopy">COPY LOG</button>
       <button id="opClear">CLEAR LOG</button>
     </div>
     <div id="opCount" style="font-size:10px;color:#4a5b6b;letter-spacing:1px"></div>
@@ -385,17 +398,18 @@ const LOG_KEY = "fd_proto_log_v1";
 let logBuf = [];
 function loadLog(){ try{ return JSON.parse(localStorage.getItem(LOG_KEY)||"[]"); }catch(e){ return []; } }
 function saveLog(){ try{ localStorage.setItem(LOG_KEY, JSON.stringify(logBuf)); }catch(e){} }
+/* tester / lvl / att / qv only change at shift_start, and repeating them on
+   every line was 38% of the dump; wall likewise. The reader carries them
+   forward from the last shift_start. Measured 2026-10-08 on a real session:
+   82 kB for nine levels, past what a chat app will send. */
 function ev(type, data){
-  const e = Object.assign({
-    t: G ? +G.t.toFixed(2) : 0,
-    wall: Date.now(),
-    tester: CFG.TESTER,
-    lvl: G ? G.tt.id : null,
-    att: G ? G.attempt : null,
-    qv: G ? G.queueVisible : null,
-    type
-  }, data||{});
-  logBuf.push(e); saveLog();
+  const head = (type === "shift_start")
+    ? { t: G ? +G.t.toFixed(2) : 0, wall: Date.now(), tester: CFG.TESTER,
+        lvl: G ? G.tt.id : null, att: G ? G.attempt : null,
+        qv: G ? G.queueVisible : null, type }
+    : { t: G ? +G.t.toFixed(2) : 0, type };
+  logBuf.push(Object.assign(head, data || {}));
+  saveLog();
 }
 function snapshot(){
   if(!G) return {};
@@ -591,7 +605,7 @@ function canAssign(ai, g){
 function doAssign(ai, g){
   const a = G.ac[ai];
   G.gate[g].resv = ai;
-  ev("assign", Object.assign({cs:a.cs, gate:g, from:a.st}, {state:snapshot()}));
+  ev("assign", {cs:a.cs, gate:g, from:a.st});
   seat();
   G.struct++;
 }
@@ -635,12 +649,12 @@ function doService(srv, g){
     const fin = G.t + trav + SERVICES[srv];
     G.jobs.push({fin, ac:a.i, srv, unit, start:G.t + trav});
     u.free = fin;
-    ev("dispatch", {cs:a.cs, srv, gate:g, travel:trav, state:snapshot()});
+    ev("dispatch", {cs:a.cs, srv, gate:g, travel:trav});
     moveVeh(srv, unit, from, g, G.t, G.t+trav, true);
   } else {
     G.pend.push({ready:G.t + trav, gate:g, srv, unit, start:G.t, from});
     u.free = 1e9;                        // committed until collected
-    ev("stage", {srv, gate:g, forCs:G.ac[gt.resv].cs, travel:trav, state:snapshot()});
+    ev("stage", {srv, gate:g, forCs:G.ac[gt.resv].cs, travel:trav});
     moveVeh(srv, unit, from, g, G.t, G.t+trav, true);
   }
   G.struct++;
@@ -937,10 +951,18 @@ document.addEventListener("visibilitychange", ()=>{ if(G) ev("visibility", {hidd
    which condition a level is in, and a button reading "BLIND" does exactly that.
    Hidden unless the URL carries ?op — the tester's link has no query string, so
    they see level numbers and nothing else. No build step, still one file. */
-const OPERATOR = new URLSearchParams(location.search).has("op");
+const PARAMS = new URLSearchParams(location.search);
+const OPERATOR = PARAMS.has("op");
 if(!OPERATOR){
   document.querySelector(".ops").classList.add("hid");
 }
+
+/* §5.4 counterbalancing: the condition schedule is flipped for every second
+   tester in the cohort, and CFG.TESTER resets on every page load — so it cannot
+   be set from the operator panel and then handed over. ?t=B carries it in the
+   link instead. The parameter is opaque to the tester and tells them nothing. */
+const T = (PARAMS.get("t") || "A").toUpperCase();
+if(T === "A" || T === "B") CFG.TESTER = T;
 
 const attempts = {};
 function openMenu(){
@@ -982,6 +1004,22 @@ el("opQV").addEventListener("change", e=>{ CFG.FORCE_QUEUE_VISIBLE = e.target.ch
 el("opLD").addEventListener("change", e=>{ CFG.LANE_DISTANCE_VARIES = e.target.checked; });
 el("opRB").addEventListener("change", e=>{ CFG.VEHICLE_RETURNS_TO_BASE = e.target.checked; });
 el("opPD").addEventListener("change", e=>{ CFG.PRE_DISPATCH = e.target.checked; });
+/* A full ten-level session runs past 80 000 characters, which WhatsApp refuses
+   to send as a message (2026-10-08, first real tester). A file has no such
+   limit and travels as an ordinary attachment. COPY stays as the fallback for
+   anywhere a download is awkward. No backend: a Blob is made in the page. */
+el("opSave").addEventListener("click", ()=>{
+  const text = logBuf.map(e=>JSON.stringify(e)).join("\n");
+  const stamp = new Date().toISOString().slice(0,16).replace(/[:T-]/g,"");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type:"text/plain"}));
+  a.download = "fd-log-" + CFG.TESTER + "-" + stamp + ".txt";
+  document.body.appendChild(a);
+  a.click();
+  el("opSave").textContent = "SAVED";
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove();
+                   el("opSave").textContent = "SAVE LOG"; }, 1500);
+});
 el("opCopy").addEventListener("click", async ()=>{
   const text = logBuf.map(e=>JSON.stringify(e)).join("\n");
   try{ await navigator.clipboard.writeText(text); el("opCopy").textContent = "COPIED"; }
