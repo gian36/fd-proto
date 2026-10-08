@@ -981,7 +981,13 @@ if(!OPERATOR){
    be set from the operator panel and then handed over. ?t=B carries it in the
    link instead. The parameter is opaque to the tester and tells them nothing. */
 const T = (PARAMS.get("t") || "A").toUpperCase();
-if(T === "A" || T === "B") CFG.TESTER = T;
+if(T === "A" || T === "B"){
+  CFG.TESTER = T;
+  // the dropdown is the only place an operator can SEE which schedule is live;
+  // leaving it showing "A" while CFG.TESTER was "B" made it worse than useless
+  const sel = document.getElementById("opTester");
+  if(sel) sel.value = T;
+}
 
 const attempts = {};
 function openMenu(){
