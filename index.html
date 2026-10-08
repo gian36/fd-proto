@@ -366,6 +366,7 @@ const DELAY_RATE= 0.25;                   // delay units per second per overdue 
 const FLAT_TRAVEL = 3;                    // §5.1 null configuration
 const LANE_NEAR = 2, LANE_FAR = 5;        // §5.1 LANE_DISTANCE_VARIES
 const QUEUE_SHOWN = 4;                    // §2: 3-4 announced arrivals
+const HOLD_OFF_MIN = 1.5;                 // seconds; see "abstention" in step()
 
 /* §5 switches. QUEUE_VISIBLE is not a plain boolean: §5.4 assigns it per level
    and counterbalances it across testers. */
@@ -447,6 +448,7 @@ function startShift(levelId, attempt){
       dl: a.eta + a.slack
     })),
     gate: Array.from({length: tt.lanes}, ()=>({ac:null, resv:null})),
+    waitFrom: null,       // start of the current could-have-assigned-but-didn't
     units: {},          // srv -> [{free:0, pos:-1}]
     jobs: [],           // {fin, ac, srv, unit, start}
     pend: [],           // {ready, gate, srv, unit, start, from}
@@ -520,6 +522,23 @@ function step(dt){
   }
   seat();
   collectStaged();
+
+  /* ABSTENTION. Tester 01 held an aircraft back and refused an available far
+     stand so a demanding one could have the near stand — the most deliberate
+     act of the whole cohort, and the log had no trace of it, because waiting
+     emits no event. A stretch where an assignment was legal and was not taken
+     is now recorded when it ends, with how long it lasted. Deliberate restraint
+     and simple confusion look alike here; the sheet tells them apart. */
+  const freeGate = G.gate.some(g => g.ac === null && g.resv === null);
+  const anyHolding = G.ac.some(a => a.st === "holding");
+  const couldAssign = freeGate && anyHolding;
+  if(couldAssign && G.waitFrom === null) G.waitFrom = G.t;
+  if(!couldAssign && G.waitFrom !== null){
+    const dur = G.t - G.waitFrom;
+    if(dur >= HOLD_OFF_MIN) ev("held_off", {dur:+dur.toFixed(2)});
+    G.waitFrom = null;
+  }
+
   if(G.delay >= FAIL_AT) finish(false);
   else if(G.ac.every(a=>a.st==="gone")) finish(true);
 }
